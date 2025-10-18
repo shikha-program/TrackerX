@@ -1,0 +1,937 @@
+"""
+expense_tracker_enhanced.py
+Enhanced Expense Tracker with additional features in a single file.
+"""
+
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import csv
+import os
+from datetime import datetime, timedelta
+from collections import defaultdict, OrderedDict
+import json
+import sqlite3
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import logging
+from functools import lru_cache
+
+# ----------------- Config / File Setup -----------------
+DATA_FILE = "expenses.csv"
+DB_FILE = "expenses_backup.db"
+JSON_BACKUP_DIR = "backups_json"
+SETTINGS_FILE = "app_settings.json"
+
+# Setup logging
+logging.basicConfig(
+    filename='expense_tracker.log',
+    level=logging.ERROR,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+# Initialize files
+if not os.path.exists(DATA_FILE):
+    with open(DATA_FILE, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Date", "Category", "Description", "Notes", "Amount"])
+
+if not os.path.exists(JSON_BACKUP_DIR):
+    os.makedirs(JSON_BACKUP_DIR)
+
+# Load settings
+def load_settings():
+    default_settings = {
+        "theme": "light",
+        "default_currency": "₹",
+        "auto_backup": True,
+        "budgets": {},
+        "recurring_expenses": []
+    }
+    try:
+        with open(SETTINGS_FILE, 'r') as f:
+            return {**default_settings, **json.load(f)}
+    except FileNotFoundError:
+        return default_settings
+
+def save_settings(settings):
+    with open(SETTINGS_FILE, 'w') as f:
+        json.dump(settings, f, indent=2)
+
+# Global settings
+SETTINGS = load_settings()
+
+# ----------------- Enhanced Helper Functions -----------------
+def safe_file_operation(func):
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            logging.error(f"Error in {func.__name__}: {str(e)}")
+            messagebox.showerror("Error", f"Operation failed: {str(e)}")
+            return None
+    return wrapper
+
+@safe_file_operation
+def read_expenses():
+    rows = []
+    try:
+        with open(DATA_FILE, newline="", encoding='utf-8') as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            for r in reader:
+                if not r or len(r) < 5:
+                    continue
+                rows.append([r[0], r[1], r[2], r[3], r[4]])
+    except FileNotFoundError:
+        return []
+    return rows
+
+@safe_file_operation
+def write_expenses(rows):
+    with open(DATA_FILE, "w", newline="", encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(["Date", "Category", "Description", "Notes", "Amount"])
+        writer.writerows(rows)
+
+@safe_file_operation
+def append_expense(row):
+    with open(DATA_FILE, "a", newline="", encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(row)
+
+def validate_expense_data(date, category, description, amount):
+    errors = []
+    if not validate_date_str(date):
+        errors.append("Invalid date format (YYYY-MM-DD)")
+    if not category.strip():
+        errors.append("Category is required")
+    if not description.strip():
+        errors.append("Description is required")
+    try:
+        float(amount)
+    except ValueError:
+        errors.append("Amount must be a valid number")
+    return errors
+
+def validate_date_str(datestr):
+    try:
+        datetime.strptime(datestr, "%Y-%m-%d")
+        return True
+    except:
+        return False
+
+@lru_cache(maxsize=128)
+def get_cached_expenses():
+    return read_expenses()
+
+def clear_cache():
+    get_cached_expenses.cache_clear()
+
+def totals_by_category(rows):
+    d = defaultdict(float)
+    for r in rows:
+        try:
+            d[r[1]] += float(r[4])
+        except:
+            pass
+    return dict(d)
+
+def totals_by_month(rows, months=6):
+    now = datetime.now()
+    month_map = OrderedDict()
+    for i in reversed(range(months)):
+        m = now - timedelta(days=now.day-1) - timedelta(days=30*i)
+        key = m.strftime("%Y-%m")
+        month_map[key] = 0.0
+    for r in rows:
+        try:
+            dt = datetime.strptime(r[0], "%Y-%m-%d")
+            key = dt.strftime("%Y-%m")
+            if key in month_map:
+                month_map[key] += float(r[4])
+        except:
+            pass
+    return month_map
+
+def top_n_categories(rows, n=3):
+    t = totals_by_category(rows)
+    sorted_cats = sorted(t.items(), key=lambda x: x[1], reverse=True)
+    return sorted_cats[:n]
+
+def get_all_categories():
+    rows = read_expenses()
+    return sorted(list(set(r[1] for r in rows if r[1].strip())))
+
+# -------------- Budget Functions -----------------
+def check_budget_alerts():
+    rows = read_expenses()
+    current_month = datetime.now().strftime("%Y-%m")
+    monthly_total = 0.0
+    category_totals = defaultdict(float)
+    
+    for r in rows:
+        if r[0].startswith(current_month):
+            try:
+                amount = float(r[4])
+                monthly_total += amount
+                category_totals[r[1]] += amount
+            except:
+                pass
+    
+    alerts = []
+    budgets = SETTINGS.get('budgets', {})
+    
+    # Check overall budget
+    overall_budget = budgets.get('overall')
+    if overall_budget and monthly_total > overall_budget:
+        alerts.append(f"⚠️ Over overall budget! (₹{monthly_total:.2f} / ₹{overall_budget:.2f})")
+    
+    # Check category budgets
+    for category, budget in budgets.items():
+        if category != 'overall' and category_totals[category] > budget:
+            alerts.append(f"⚠️ Over {category} budget! (₹{category_totals[category]:.2f} / ₹{budget:.2f})")
+    
+    return alerts
+
+# -------------- SQLite & JSON Backup -----------------
+@safe_file_operation
+def backup_to_sqlite(rows):
+    conn = sqlite3.connect(DB_FILE)
+    cur = conn.cursor()
+    cur.execute("""CREATE TABLE IF NOT EXISTS expenses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date TEXT, category TEXT, description TEXT, notes TEXT, amount REAL
+                )""")
+    cur.execute("DELETE FROM expenses")
+    for r in rows:
+        try:
+            amount = float(r[4])
+        except:
+            amount = 0.0
+        cur.execute("INSERT INTO expenses (date, category, description, notes, amount) VALUES (?, ?, ?, ?, ?)",
+                    (r[0], r[1], r[2], r[3], amount))
+    conn.commit()
+    conn.close()
+
+@safe_file_operation
+def backup_to_json(rows):
+    fname = datetime.now().strftime("backups_json/backup_%Y%m%d_%H%M%S.json")
+    with open(fname, "w", encoding="utf-8") as f:
+        json.dump([{"date": r[0], "category": r[1], "description": r[2], "notes": r[3], "amount": r[4]} for r in rows], f, indent=2)
+    return fname
+
+# ----------------- GUI Application Class -----------------
+class ExpenseTracker:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("💸 Enhanced Expense Tracker")
+        self.root.geometry("1100x700")
+        
+        # Auto-complete variables
+        self.categories = get_all_categories()
+        self.category_var = tk.StringVar()
+        
+        self.setup_gui()
+        self.refresh_data()
+        
+    def setup_gui(self):
+        # Style configuration
+        self.style = ttk.Style()
+        self.style.theme_use('clam')
+        
+        # Main notebook
+        self.nb = ttk.Notebook(self.root)
+        self.nb.pack(fill="both", expand=True, padx=10, pady=8)
+        
+        self.create_dashboard_tab()
+        self.create_expenses_tab()
+        self.create_charts_tab()
+        self.create_backup_tab()
+        self.create_budget_tab()
+        self.create_settings_tab()
+        
+        # Footer
+        self.create_footer()
+        
+    def create_dashboard_tab(self):
+        self.tab_dash = ttk.Frame(self.nb)
+        self.nb.add(self.tab_dash, text="📊 Dashboard")
+        
+        # Budget alerts frame
+        self.alert_frame = tk.Frame(self.tab_dash, bg="#FFEBEE", relief='groove', bd=1)
+        self.alert_frame.pack(fill="x", padx=12, pady=5)
+        self.alert_label = tk.Label(self.alert_frame, text="", bg="#FFEBEE", fg="#D32F2F", font=("Arial", 10))
+        self.alert_label.pack(pady=5)
+        
+        # Main dashboard content
+        dash_content = tk.Frame(self.tab_dash)
+        dash_content.pack(fill="both", expand=True, padx=12, pady=8)
+        
+        # Left column - Stats
+        left_frame = tk.Frame(dash_content)
+        left_frame.pack(side="left", fill="both", expand=True)
+        
+        # Current month total
+        stat_frame1 = tk.LabelFrame(left_frame, text="Current Month", padx=10, pady=10)
+        stat_frame1.pack(fill="x", pady=5)
+        self.label_total_val = tk.Label(stat_frame1, text="₹0.00", font=("Arial", 24, "bold"), fg="#2E7D32")
+        self.label_total_val.pack()
+        
+        # Top categories
+        stat_frame2 = tk.LabelFrame(left_frame, text="Top Categories This Month", padx=10, pady=10)
+        stat_frame2.pack(fill="x", pady=5)
+        self.label_topcats_val = tk.Label(stat_frame2, text="No data", justify="left", font=("Arial", 10))
+        self.label_topcats_val.pack()
+        
+        # Top expenses
+        stat_frame3 = tk.LabelFrame(left_frame, text="Largest Expenses", padx=10, pady=10)
+        stat_frame3.pack(fill="x", pady=5)
+        self.label_topitems_val = tk.Label(stat_frame3, text="No data", justify="left", font=("Arial", 9))
+        self.label_topitems_val.pack()
+        
+        # Right column - Charts preview
+        right_frame = tk.Frame(dash_content)
+        right_frame.pack(side="right", fill="both", expand=True, padx=10)
+        
+        # Quick charts frame
+        charts_frame = tk.LabelFrame(right_frame, text="Quick Charts", padx=10, pady=10)
+        charts_frame.pack(fill="both", expand=True, pady=5)
+        
+        # Create matplotlib figure for dashboard
+        self.dash_fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(10, 4))
+        self.dash_fig.patch.set_facecolor('#f0f0f0')
+        
+        self.canvas = FigureCanvasTkAgg(self.dash_fig, charts_frame)
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        
+        # Insight frame
+        insight_frame = tk.LabelFrame(left_frame, text="Spending Insight", padx=10, pady=10)
+        insight_frame.pack(fill="x", pady=5)
+        self.label_insight_val = tk.Label(insight_frame, text="No insight yet", wraplength=400, justify="left", font=("Arial", 9))
+        self.label_insight_val.pack()
+        
+    def create_expenses_tab(self):
+        self.tab_exp = ttk.Frame(self.nb)
+        self.nb.add(self.tab_exp, text="🧾 Expenses")
+        
+        # Entry frame
+        entry_frame = tk.LabelFrame(self.tab_exp, text="Add Expense", padx=8, pady=8)
+        entry_frame.pack(fill="x", padx=12, pady=8)
+        
+        # Date
+        tk.Label(entry_frame, text="Date (YYYY-MM-DD)").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+        self.entry_date = tk.Entry(entry_frame, width=14)
+        self.entry_date.grid(row=0, column=1, padx=6, pady=4)
+        self.entry_date.insert(0, datetime.now().strftime("%Y-%m-%d"))
+        
+        # Category with autocomplete
+        tk.Label(entry_frame, text="Category").grid(row=0, column=2, padx=6, pady=4, sticky="w")
+        self.entry_category = ttk.Combobox(entry_frame, width=18, textvariable=self.category_var, values=self.categories)
+        self.entry_category.grid(row=0, column=3, padx=6, pady=4)
+        self.entry_category.bind('<KeyRelease>', self.on_category_keyrelease)
+        
+        # Description
+        tk.Label(entry_frame, text="Description").grid(row=1, column=0, padx=6, pady=4, sticky="w")
+        self.entry_description = tk.Entry(entry_frame, width=40)
+        self.entry_description.grid(row=1, column=1, columnspan=3, padx=6, pady=4, sticky="w")
+        
+        # Notes
+        tk.Label(entry_frame, text="Notes").grid(row=2, column=0, padx=6, pady=4, sticky="w")
+        self.entry_notes = tk.Entry(entry_frame, width=40)
+        self.entry_notes.grid(row=2, column=1, columnspan=3, padx=6, pady=4, sticky="w")
+        
+        # Amount
+        tk.Label(entry_frame, text="Amount").grid(row=0, column=4, padx=6, pady=4, sticky="w")
+        self.entry_amount = tk.Entry(entry_frame, width=14)
+        self.entry_amount.grid(row=0, column=5, padx=6, pady=4)
+        
+        # Add button
+        ttk.Button(entry_frame, text="Add Expense", command=self.add_expense_gui).grid(row=1, column=5, padx=6, pady=8)
+        
+        # Search/filter frame
+        self.create_search_frame()
+        
+        # Table frame
+        self.create_table_frame()
+        
+    def create_search_frame(self):
+        filter_frame = tk.LabelFrame(self.tab_exp, text="Search & Filters", padx=8, pady=6)
+        filter_frame.pack(fill="x", padx=12, pady=6)
+        
+        tk.Label(filter_frame, text="Keyword").grid(row=0, column=0, padx=4)
+        self.search_entry = tk.Entry(filter_frame, width=20)
+        self.search_entry.grid(row=0, column=1, padx=4)
+        
+        tk.Label(filter_frame, text="Category").grid(row=0, column=2, padx=4)
+        self.filter_cat_entry = ttk.Combobox(filter_frame, width=18, values=self.categories)
+        self.filter_cat_entry.grid(row=0, column=3, padx=4)
+        
+        tk.Label(filter_frame, text="From (YYYY-MM-DD)").grid(row=1, column=0, padx=4, pady=4)
+        self.filter_from_entry = tk.Entry(filter_frame, width=14)
+        self.filter_from_entry.grid(row=1, column=1, padx=4)
+        
+        tk.Label(filter_frame, text="To (YYYY-MM-DD)").grid(row=1, column=2, padx=4)
+        self.filter_to_entry = tk.Entry(filter_frame, width=14)
+        self.filter_to_entry.grid(row=1, column=3, padx=4)
+        
+        ttk.Button(filter_frame, text="Search/Filter", command=self.search_filter).grid(row=0, column=4, padx=8)
+        ttk.Button(filter_frame, text="Reset", command=self.reset_filters).grid(row=0, column=5, padx=8)
+        ttk.Button(filter_frame, text="Export Filtered", command=self.export_filtered).grid(row=1, column=4, columnspan=2, padx=8, pady=4)
+        
+    def create_table_frame(self):
+        table_frame = tk.Frame(self.tab_exp)
+        table_frame.pack(fill="both", expand=True, padx=12, pady=6)
+        
+        columns = ("Date", "Category", "Description", "Notes", "Amount")
+        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
+        
+        for c in columns:
+            self.tree.heading(c, text=c)
+            self.tree.column(c, anchor="center", width=140 if c!="Description" else 260)
+        
+        self.tree.pack(side="left", fill="both", expand=True)
+        
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscroll=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Action buttons
+        btn_frame = tk.Frame(self.tab_exp)
+        btn_frame.pack(fill="x", padx=12, pady=6)
+        
+        ttk.Button(btn_frame, text="Update Selected", command=self.update_selected).pack(side="left", padx=6)
+        ttk.Button(btn_frame, text="Delete Selected", command=self.delete_selected).pack(side="left", padx=6)
+        ttk.Button(btn_frame, text="Duplicate Selected", command=self.duplicate_selected).pack(side="left", padx=6)
+        
+    def create_charts_tab(self):
+        self.tab_charts = ttk.Frame(self.nb)
+        self.nb.add(self.tab_charts, text="📈 Charts")
+        
+        chart_btn_frame = tk.Frame(self.tab_charts)
+        chart_btn_frame.pack(fill="x", padx=12, pady=8)
+        
+        ttk.Button(chart_btn_frame, text="Pie: Spending by Category", command=self.show_pie_chart).pack(side="left", padx=6)
+        ttk.Button(chart_btn_frame, text="Bar: Last 6 Months", command=self.show_month_bar_chart).pack(side="left", padx=6)
+        ttk.Button(chart_btn_frame, text="Line: Spending Trend", command=self.show_line_chart).pack(side="left", padx=6)
+        
+    def create_backup_tab(self):
+        self.tab_backup = ttk.Frame(self.nb)
+        self.nb.add(self.tab_backup, text="💾 Backup & Export")
+        
+        tk.Label(self.tab_backup, text="Data Management", font=("Arial", 12)).pack(pady=8)
+        
+        btn_frame = tk.Frame(self.tab_backup)
+        btn_frame.pack(pady=10)
+        
+        ttk.Button(btn_frame, text="Export CSV", command=self.export_csv_ui).grid(row=0, column=0, padx=6, pady=6)
+        ttk.Button(btn_frame, text="Backup to JSON", command=self.backup_json_ui).grid(row=0, column=1, padx=6, pady=6)
+        ttk.Button(btn_frame, text="Backup to SQLite", command=self.backup_sqlite_ui).grid(row=0, column=2, padx=6, pady=6)
+        ttk.Button(btn_frame, text="Import CSV", command=self.import_csv_ui).grid(row=1, column=0, padx=6, pady=6)
+        ttk.Button(btn_frame, text="Auto Backup Now", command=self.auto_backup).grid(row=1, column=1, padx=6, pady=6)
+        
+    def create_budget_tab(self):
+        self.tab_budget = ttk.Frame(self.nb)
+        self.nb.add(self.tab_budget, text="💰 Budget")
+        
+        # Budget setup frame
+        setup_frame = tk.LabelFrame(self.tab_budget, text="Set Budgets", padx=10, pady=10)
+        setup_frame.pack(fill="x", padx=12, pady=8)
+        
+        tk.Label(setup_frame, text="Overall Monthly Budget:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.overall_budget_entry = tk.Entry(setup_frame, width=15)
+        self.overall_budget_entry.grid(row=0, column=1, padx=5, pady=5)
+        
+        tk.Label(setup_frame, text="Category Budget:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.cat_budget_combo = ttk.Combobox(setup_frame, width=15, values=self.categories)
+        self.cat_budget_combo.grid(row=1, column=1, padx=5, pady=5)
+        
+        tk.Label(setup_frame, text="Amount:").grid(row=1, column=2, padx=5, pady=5, sticky="w")
+        self.cat_budget_amount = tk.Entry(setup_frame, width=15)
+        self.cat_budget_amount.grid(row=1, column=3, padx=5, pady=5)
+        
+        ttk.Button(setup_frame, text="Set Budget", command=self.set_budget).grid(row=1, column=4, padx=10, pady=5)
+        
+        # Current budgets display
+        budget_display = tk.LabelFrame(self.tab_budget, text="Current Budgets", padx=10, pady=10)
+        budget_display.pack(fill="both", expand=True, padx=12, pady=8)
+        
+        self.budget_text = tk.Text(budget_display, height=10, width=60)
+        self.budget_text.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        ttk.Button(budget_display, text="Refresh Budgets", command=self.update_budget_display).pack(pady=5)
+        
+    def create_settings_tab(self):
+        self.tab_settings = ttk.Frame(self.nb)
+        self.nb.add(self.tab_settings, text="⚙️ Settings")
+        
+        settings_frame = tk.Frame(self.tab_settings)
+        settings_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Theme selection
+        tk.Label(settings_frame, text="Theme:", font=("Arial", 10)).grid(row=0, column=0, sticky="w", pady=5)
+        self.theme_var = tk.StringVar(value=SETTINGS.get('theme', 'light'))
+        theme_combo = ttk.Combobox(settings_frame, textvariable=self.theme_var, values=['light', 'dark'], state='readonly')
+        theme_combo.grid(row=0, column=1, sticky="w", pady=5)
+        
+        # Currency
+        tk.Label(settings_frame, text="Currency Symbol:", font=("Arial", 10)).grid(row=1, column=0, sticky="w", pady=5)
+        self.currency_var = tk.StringVar(value=SETTINGS.get('default_currency', '₹'))
+        currency_entry = tk.Entry(settings_frame, textvariable=self.currency_var, width=5)
+        currency_entry.grid(row=1, column=1, sticky="w", pady=5)
+        
+        # Auto backup
+        self.auto_backup_var = tk.BooleanVar(value=SETTINGS.get('auto_backup', True))
+        ttk.Checkbutton(settings_frame, text="Auto backup on exit", variable=self.auto_backup_var).grid(row=2, column=0, sticky="w", pady=5)
+        
+        # Save settings button
+        ttk.Button(settings_frame, text="Save Settings", command=self.save_settings).grid(row=3, column=0, columnspan=2, pady=15)
+        
+    def create_footer(self):
+        footer = tk.Frame(self.root, pady=6, bg="#f0f0f0")
+        footer.pack(fill="x")
+        
+        ttk.Button(footer, text="Refresh All", command=self.refresh_data).pack(side="left", padx=8)
+        ttk.Button(footer, text="Clear Entry Fields", command=self.clear_entry_fields).pack(side="left", padx=8)
+        ttk.Button(footer, text="Exit", command=self.safe_exit).pack(side="right", padx=8)
+        
+    # ----------------- Enhanced GUI Methods -----------------
+    def on_category_keyrelease(self, event):
+        typed = self.category_var.get()
+        if typed:
+            self.entry_category['values'] = [cat for cat in self.categories if typed.lower() in cat.lower()]
+        else:
+            self.entry_category['values'] = self.categories
+            
+    def refresh_data(self):
+        clear_cache()
+        self.categories = get_all_categories()
+        self.refresh_tree()
+        self.update_dashboard()
+        self.update_budget_display()
+        self.check_budgets()
+        
+    def check_budgets(self):
+        alerts = check_budget_alerts()
+        if alerts:
+            alert_text = "\n".join(alerts)
+            self.alert_label.config(text=alert_text)
+        else:
+            self.alert_label.config(text="All budgets are within limits ✅")
+            
+    def update_budget_display(self):
+        budgets = SETTINGS.get('budgets', {})
+        self.budget_text.delete(1.0, tk.END)
+        
+        if not budgets:
+            self.budget_text.insert(1.0, "No budgets set yet.\nUse the form above to set budgets.")
+            return
+            
+        self.budget_text.insert(1.0, "Current Budgets:\n\n")
+        for category, amount in budgets.items():
+            self.budget_text.insert(tk.END, f"• {category}: ₹{amount:.2f}\n")
+            
+    def set_budget(self):
+        category = self.cat_budget_combo.get().strip()
+        amount_str = self.cat_budget_amount.get().strip()
+        
+        if not amount_str:
+            messagebox.showwarning("Missing", "Please enter budget amount")
+            return
+            
+        try:
+            amount = float(amount_str)
+        except ValueError:
+            messagebox.showerror("Invalid", "Amount must be a number")
+            return
+            
+        if category:
+            # Category-specific budget
+            SETTINGS['budgets'][category] = amount
+        else:
+            # Overall budget
+            SETTINGS['budgets']['overall'] = amount
+            
+        save_settings(SETTINGS)
+        self.update_budget_display()
+        self.check_budgets()
+        messagebox.showinfo("Success", "Budget set successfully!")
+        
+    def save_settings(self):
+        SETTINGS['theme'] = self.theme_var.get()
+        SETTINGS['default_currency'] = self.currency_var.get()
+        SETTINGS['auto_backup'] = self.auto_backup_var.get()
+        save_settings(SETTINGS)
+        messagebox.showinfo("Settings", "Settings saved successfully!")
+        
+    def safe_exit(self):
+        if SETTINGS.get('auto_backup', True):
+            self.auto_backup()
+        self.root.quit()
+        
+    def auto_backup(self):
+        rows = read_expenses()
+        if rows:
+            backup_to_sqlite(rows)
+            backup_to_json(rows)
+            
+    def export_filtered(self):
+        # Export currently filtered data
+        file = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not file:
+            return
+            
+        # Get current treeview data
+        rows = []
+        for item in self.tree.get_children():
+            rows.append(self.tree.item(item)['values'])
+            
+        with open(file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Date", "Category", "Description", "Notes", "Amount"])
+            writer.writerows(rows)
+        messagebox.showinfo("Exported", f"Filtered data exported to {file}")
+        
+    def import_csv_ui(self):
+        file = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
+        if not file:
+            return
+            
+        try:
+            imported_rows = []
+            with open(file, newline="") as f:
+                reader = csv.reader(f)
+                header = next(reader, None)
+                for row in reader:
+                    if len(row) >= 5:
+                        imported_rows.append(row[:5])  # Take first 5 columns
+                        
+            if imported_rows:
+                # Append to existing data
+                current_rows = read_expenses()
+                current_rows.extend(imported_rows)
+                write_expenses(current_rows)
+                self.refresh_data()
+                messagebox.showinfo("Success", f"Imported {len(imported_rows)} expenses successfully!")
+                
+        except Exception as e:
+            messagebox.showerror("Import Error", f"Failed to import: {str(e)}")
+            
+    def duplicate_selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Select", "Please select an expense to duplicate.")
+            return
+            
+        idx = int(sel[0])
+        rows = read_expenses()
+        if 0 <= idx < len(rows):
+            expense = rows[idx].copy()
+            # Create a duplicate with "Copy" in description
+            expense[2] = f"{expense[2]} (Copy)"
+            append_expense(expense)
+            self.refresh_data()
+            messagebox.showinfo("Duplicated", "Expense duplicated successfully!")
+            
+    def show_line_chart(self):
+        rows = read_expenses()
+        monthly_totals = totals_by_month(rows, months=12)
+        
+        if not any(monthly_totals.values()):
+            messagebox.showinfo("Empty", "No data to show.")
+            return
+            
+        plt.figure(figsize=(10, 5))
+        months = list(monthly_totals.keys())
+        amounts = list(monthly_totals.values())
+        
+        plt.plot(months, amounts, marker='o', linewidth=2, markersize=6)
+        plt.xlabel("Month")
+        plt.ylabel("Amount Spent")
+        plt.title("Spending Trend (Last 12 Months)")
+        plt.xticks(rotation=45)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.show()
+        
+    # ----------------- Core GUI Methods (adapted from original) -----------------
+    def refresh_tree(self, filter_rows=None):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        rows = filter_rows if filter_rows is not None else read_expenses()
+        for i, r in enumerate(rows):
+            self.tree.insert("", "end", iid=str(i), values=r)
+            
+    def clear_entry_fields(self):
+        self.entry_category.delete(0, tk.END)
+        self.entry_description.delete(0, tk.END)
+        self.entry_notes.delete(0, tk.END)
+        self.entry_amount.delete(0, tk.END)
+        self.entry_date.delete(0, tk.END)
+        self.entry_date.insert(0, datetime.now().strftime("%Y-%m-%d"))
+        
+    def add_expense_gui(self):
+        date = self.entry_date.get().strip()
+        if not date:
+            date = datetime.now().strftime("%Y-%m-%d")
+            
+        cat = self.entry_category.get().strip()
+        desc = self.entry_description.get().strip()
+        notes = self.entry_notes.get().strip()
+        amt = self.entry_amount.get().strip()
+        
+        errors = validate_expense_data(date, cat, desc, amt)
+        if errors:
+            messagebox.showerror("Validation Error", "\n".join(errors))
+            return
+            
+        try:
+            amt_f = float(amt)
+        except ValueError:
+            messagebox.showerror("Invalid Amount", "Amount must be a number")
+            return
+            
+        row = [date, cat, desc, notes, f"{amt_f:.2f}"]
+        append_expense(row)
+        self.refresh_data()
+        self.clear_entry_fields()
+        messagebox.showinfo("Added", "Expense added ✅")
+        
+    def delete_selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Select", "Please select an expense to delete.")
+            return
+            
+        if messagebox.askyesno("Confirm", "Are you sure you want to delete this expense?"):
+            idx = int(sel[0])
+            rows = read_expenses()
+            if 0 <= idx < len(rows):
+                del rows[idx]
+                write_expenses(rows)
+                self.refresh_data()
+                messagebox.showinfo("Deleted", "Expense deleted ✅")
+                
+    def update_selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Select", "Select an expense to update.")
+            return
+            
+        idx = int(sel[0])
+        rows = read_expenses()
+        old = rows[idx]
+
+        win = tk.Toplevel(self.root)
+        win.title("Update Expense")
+        win.geometry("420x220")
+
+        tk.Label(win, text="Date (YYYY-MM-DD)").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        e_date = tk.Entry(win); e_date.grid(row=0, column=1, padx=6, pady=6)
+        e_date.insert(0, old[0])
+
+        tk.Label(win, text="Category").grid(row=1, column=0, sticky="w", padx=6)
+        e_cat = ttk.Combobox(win, values=self.categories); e_cat.grid(row=1, column=1, padx=6)
+        e_cat.set(old[1])
+
+        tk.Label(win, text="Description").grid(row=2, column=0, sticky="w", padx=6)
+        e_desc = tk.Entry(win); e_desc.grid(row=2, column=1, padx=6)
+        e_desc.insert(0, old[2])
+
+        tk.Label(win, text="Notes").grid(row=3, column=0, sticky="w", padx=6)
+        e_notes = tk.Entry(win); e_notes.grid(row=3, column=1, padx=6)
+        e_notes.insert(0, old[3])
+
+        tk.Label(win, text="Amount").grid(row=4, column=0, sticky="w", padx=6)
+        e_amt = tk.Entry(win); e_amt.grid(row=4, column=1, padx=6)
+        e_amt.insert(0, old[4])
+
+        def save_update():
+            new_date = e_date.get().strip()
+            if not validate_date_str(new_date):
+                messagebox.showerror("Invalid Date", "Date must be YYYY-MM-DD")
+                return
+            try:
+                new_amt = float(e_amt.get().strip())
+            except:
+                messagebox.showerror("Invalid Amount", "Amount must be a number")
+                return
+            rows[idx] = [new_date, e_cat.get().strip(), e_desc.get().strip(), e_notes.get().strip(), f"{new_amt:.2f}"]
+            write_expenses(rows)
+            self.refresh_data()
+            win.destroy()
+            messagebox.showinfo("Updated", "Expense updated ✅")
+
+        ttk.Button(win, text="Save", command=save_update).grid(row=5, column=0, columnspan=2, pady=10)
+        
+    def search_filter(self):
+        keyword = self.search_entry.get().strip().lower()
+        cat_filter = self.filter_cat_entry.get().strip().lower()
+        date_from = self.filter_from_entry.get().strip()
+        date_to = self.filter_to_entry.get().strip()
+
+        rows = read_expenses()
+        results = []
+        for r in rows:
+            date_ok = True
+            if date_from:
+                if not validate_date_str(date_from):
+                    messagebox.showerror("Invalid Date", "Date From must be YYYY-MM-DD")
+                    return
+                if datetime.strptime(r[0], "%Y-%m-%d") < datetime.strptime(date_from, "%Y-%m-%d"):
+                    date_ok = False
+            if date_to:
+                if not validate_date_str(date_to):
+                    messagebox.showerror("Invalid Date", "Date To must be YYYY-MM-DD")
+                    return
+                if datetime.strptime(r[0], "%Y-%m-%d") > datetime.strptime(date_to, "%Y-%m-%d"):
+                    date_ok = False
+            if not date_ok:
+                continue
+
+            text_blob = " ".join([r[1], r[2], r[3]]).lower()
+            if keyword and keyword not in text_blob:
+                continue
+            if cat_filter and cat_filter != r[1].lower():
+                continue
+            results.append(r)
+
+        self.refresh_tree(filter_rows=results)
+        
+    def reset_filters(self):
+        self.search_entry.delete(0, tk.END)
+        self.filter_cat_entry.delete(0, tk.END)
+        self.filter_from_entry.delete(0, tk.END)
+        self.filter_to_entry.delete(0, tk.END)
+        self.refresh_tree()
+        
+    def update_dashboard(self):
+        rows = read_expenses()
+        currency = SETTINGS.get('default_currency', '₹')
+        
+        # Current month total
+        now = datetime.now()
+        month_str = now.strftime("%Y-%m")
+        total_month = 0.0
+        for r in rows:
+            try:
+                if r[0].startswith(month_str):
+                    total_month += float(r[4])
+            except:
+                pass
+        self.label_total_val.config(text=f"{currency}{total_month:.2f}")
+
+        # Top categories
+        top = top_n_categories(rows, n=3)
+        txt = "\n".join([f"{i+1}. {c} — {currency}{amt:.2f}" for i, (c, amt) in enumerate(top)]) if top else "No data"
+        self.label_topcats_val.config(text=txt)
+
+        # Top 3 items
+        sorted_items = sorted(rows, key=lambda x: float(x[4]) if x[4] else 0, reverse=True)[:3]
+        items_txt = "\n".join([f"{it[0]} | {it[1]} | {currency}{it[4]}" for it in sorted_items]) if sorted_items else "No data"
+        self.label_topitems_val.config(text=items_txt)
+
+        # Insight
+        this_month_total = 0.0
+        last_month_total = 0.0
+        try:
+            for r in rows:
+                dt = datetime.strptime(r[0], "%Y-%m-%d")
+                if dt.strftime("%Y-%m") == now.strftime("%Y-%m"):
+                    this_month_total += float(r[4])
+                last_month = (now.replace(day=1) - timedelta(days=1))
+                if dt.strftime("%Y-%m") == last_month.strftime("%Y-%m"):
+                    last_month_total += float(r[4])
+            if last_month_total == 0:
+                insight = "No data for last month to compare."
+            else:
+                diff = this_month_total - last_month_total
+                perc = (diff / last_month_total) * 100
+                if diff > 0:
+                    insight = f"Spending ↑ {abs(perc):.1f}% vs last month (spent {currency}{diff:.2f} more)."
+                elif diff < 0:
+                    insight = f"Spending ↓ {abs(perc):.1f}% vs last month (saved {currency}{abs(diff):.2f})."
+                else:
+                    insight = "Spending same as last month."
+        except Exception as e:
+            insight = "Not enough data to generate insight."
+        self.label_insight_val.config(text=insight)
+        
+        # Update mini charts
+        self.update_mini_charts(rows)
+        
+    def update_mini_charts(self, rows):
+        # Clear previous plots
+        self.ax1.clear()
+        self.ax2.clear()
+        
+        # Pie chart for categories
+        cat_totals = totals_by_category(rows)
+        if cat_totals:
+            self.ax1.pie(cat_totals.values(), labels=cat_totals.keys(), autopct='%1.1f%%', startangle=90)
+            self.ax1.set_title('Spending by Category')
+            
+        # Bar chart for monthly spending
+        monthly_totals = totals_by_month(rows, 6)
+        if monthly_totals:
+            months = list(monthly_totals.keys())
+            amounts = list(monthly_totals.values())
+            self.ax2.bar(months, amounts, color='skyblue')
+            self.ax2.set_title('Last 6 Months')
+            self.ax2.tick_params(axis='x', rotation=45)
+            
+        self.canvas.draw()
+        
+    def show_pie_chart(self):
+        rows = read_expenses()
+        t = totals_by_category(rows)
+        if not t:
+            messagebox.showinfo("Empty", "No data to show.")
+            return
+        plt.figure(figsize=(8,8))
+        plt.pie(t.values(), labels=t.keys(), autopct='%1.1f%%', startangle=140)
+        plt.title("Spending by Category")
+        plt.show()
+        
+    def show_month_bar_chart(self):
+        rows = read_expenses()
+        m = totals_by_month(rows, months=6)
+        if not m:
+            messagebox.showinfo("Empty", "No data to show.")
+            return
+        labels = list(m.keys())
+        vals = list(m.values())
+        plt.figure(figsize=(10,5))
+        plt.bar(labels, vals, color='lightcoral')
+        plt.xlabel("Month")
+        plt.ylabel("Amount")
+        plt.title("Spending by Month (last 6 months)")
+        plt.xticks(rotation=30)
+        plt.tight_layout()
+        plt.show()
+        
+    def export_csv_ui(self):
+        file = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not file:
+            return
+        rows = read_expenses()
+        with open(file, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Date", "Category", "Description", "Notes", "Amount"])
+            writer.writerows(rows)
+        messagebox.showinfo("Exported", f"Exported to {file}")
+        
+    def backup_json_ui(self):
+        rows = read_expenses()
+        fname = backup_to_json(rows)
+        messagebox.showinfo("Backup", f"JSON backup created: {fname}")
+        
+    def backup_sqlite_ui(self):
+        rows = read_expenses()
+        backup_to_sqlite(rows)
+        messagebox.showinfo("Backup", f"SQLite backup created at {DB_FILE}")
+
+# ----------------- Main Execution -----------------
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = ExpenseTracker(root)
+    root.mainloop()
