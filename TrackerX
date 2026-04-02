@@ -1,9 +1,4 @@
-"""
-expense_tracker_enhanced.py
-Enhanced Expense Tracker with additional features in a single file.
-"""
-
-import tkinter as tk
+ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import csv
 import os
@@ -11,25 +6,28 @@ from datetime import datetime, timedelta
 from collections import defaultdict, OrderedDict
 import json
 import sqlite3
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+try:
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    plt = None
+    FigureCanvasTkAgg = None
+    MATPLOTLIB_AVAILABLE = False
 import logging
 from functools import lru_cache
 
-# ----------------- Config / File Setup -----------------
 DATA_FILE = "expenses.csv"
 DB_FILE = "expenses_backup.db"
 JSON_BACKUP_DIR = "backups_json"
 SETTINGS_FILE = "app_settings.json"
 
-# Setup logging
 logging.basicConfig(
     filename='expense_tracker.log',
     level=logging.ERROR,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# Initialize files
 if not os.path.exists(DATA_FILE):
     with open(DATA_FILE, "w", newline="") as f:
         writer = csv.writer(f)
@@ -38,7 +36,6 @@ if not os.path.exists(DATA_FILE):
 if not os.path.exists(JSON_BACKUP_DIR):
     os.makedirs(JSON_BACKUP_DIR)
 
-# Load settings
 def load_settings():
     default_settings = {
         "theme": "light",
@@ -57,10 +54,45 @@ def save_settings(settings):
     with open(SETTINGS_FILE, 'w') as f:
         json.dump(settings, f, indent=2)
 
-# Global settings
 SETTINGS = load_settings()
 
-# ----------------- Enhanced Helper Functions -----------------
+LIGHT_THEME = {
+    "bg": "#f4efe6",
+    "surface": "#fffaf3",
+    "surface_alt": "#f7efe2",
+    "accent": "#1f6f78",
+    "accent_soft": "#d8ecee",
+    "text": "#2d241f",
+    "muted": "#6b5b53",
+    "danger_bg": "#fde8e4",
+    "danger_text": "#b2402e",
+    "border": "#d8c7b8",
+    "table_header": "#eadcca",
+    "table_selected": "#cfe8ea",
+}
+
+DARK_THEME = {
+    "bg": "#1f2428",
+    "surface": "#273036",
+    "surface_alt": "#303b42",
+    "accent": "#57c5b6",
+    "accent_soft": "#173c43",
+    "text": "#f2efe8",
+    "muted": "#c1b6ab",
+    "danger_bg": "#48252a",
+    "danger_text": "#ffb4a8",
+    "border": "#40505b",
+    "table_header": "#35424a",
+    "table_selected": "#1f6f78",
+}
+
+
+def show_chart_unavailable():
+    messagebox.showwarning(
+        "Charts Unavailable",
+        "Install matplotlib to use chart features."
+    )
+
 def safe_file_operation(func):
     def wrapper(*args, **kwargs):
         try:
@@ -162,7 +194,6 @@ def get_all_categories():
     rows = read_expenses()
     return sorted(list(set(r[1] for r in rows if r[1].strip())))
 
-# -------------- Budget Functions -----------------
 def check_budget_alerts():
     rows = read_expenses()
     current_month = datetime.now().strftime("%Y-%m")
@@ -181,19 +212,16 @@ def check_budget_alerts():
     alerts = []
     budgets = SETTINGS.get('budgets', {})
     
-    # Check overall budget
     overall_budget = budgets.get('overall')
     if overall_budget and monthly_total > overall_budget:
         alerts.append(f"⚠️ Over overall budget! (₹{monthly_total:.2f} / ₹{overall_budget:.2f})")
     
-    # Check category budgets
     for category, budget in budgets.items():
         if category != 'overall' and category_totals[category] > budget:
             alerts.append(f"⚠️ Over {category} budget! (₹{category_totals[category]:.2f} / ₹{budget:.2f})")
     
     return alerts
 
-# -------------- SQLite & JSON Backup -----------------
 @safe_file_operation
 def backup_to_sqlite(rows):
     conn = sqlite3.connect(DB_FILE)
@@ -226,6 +254,7 @@ class ExpenseTracker:
         self.root = root
         self.root.title("💸 Enhanced Expense Tracker")
         self.root.geometry("1100x700")
+        self.colors = LIGHT_THEME.copy()
         
         # Auto-complete variables
         self.categories = get_all_categories()
@@ -238,6 +267,7 @@ class ExpenseTracker:
         # Style configuration
         self.style = ttk.Style()
         self.style.theme_use('clam')
+        self.apply_theme()
         
         # Main notebook
         self.nb = ttk.Notebook(self.root)
@@ -252,62 +282,202 @@ class ExpenseTracker:
         
         # Footer
         self.create_footer()
+
+    def apply_theme(self):
+        self.colors = DARK_THEME.copy() if SETTINGS.get('theme') == 'dark' else LIGHT_THEME.copy()
+        c = self.colors
+        button_fg = c["text"] if SETTINGS.get('theme') == 'light' else c["bg"]
+
+        self.root.configure(bg=c["bg"])
+        self.style.configure(".", background=c["bg"], foreground=c["text"], font=("Segoe UI", 10))
+        self.style.configure("TFrame", background=c["bg"])
+        self.style.configure("TNotebook", background=c["bg"], borderwidth=0, tabmargins=(6, 6, 6, 0))
+        self.style.configure(
+            "TNotebook.Tab",
+            background=c["surface_alt"],
+            foreground=c["muted"],
+            padding=(14, 8),
+            font=("Segoe UI Semibold", 10),
+        )
+        self.style.map(
+            "TNotebook.Tab",
+            background=[("selected", c["surface"]), ("active", c["accent_soft"])],
+            foreground=[("selected", c["accent"]), ("active", c["text"])],
+        )
+        self.style.configure(
+            "TButton",
+            background=c["accent"],
+            foreground=button_fg,
+            borderwidth=0,
+            focusthickness=0,
+            padding=(12, 8),
+            font=("Segoe UI Semibold", 10),
+        )
+        self.style.map(
+            "TButton",
+            background=[("active", c["accent"]), ("pressed", c["accent_soft"])],
+            foreground=[("active", button_fg)],
+        )
+        self.style.configure(
+            "Treeview",
+            background=c["surface"],
+            fieldbackground=c["surface"],
+            foreground=c["text"],
+            rowheight=28,
+            bordercolor=c["border"],
+            font=("Segoe UI", 10),
+        )
+        self.style.configure(
+            "Treeview.Heading",
+            background=c["table_header"],
+            foreground=c["text"],
+            relief="flat",
+            font=("Segoe UI Semibold", 10),
+        )
+        self.style.map(
+            "Treeview",
+            background=[("selected", c["table_selected"])],
+            foreground=[("selected", c["text"])],
+        )
+        self.style.configure(
+            "TCombobox",
+            fieldbackground=c["surface"],
+            background=c["surface"],
+            foreground=c["text"],
+            arrowcolor=c["accent"],
+            bordercolor=c["border"],
+        )
+        self.style.configure("TCheckbutton", background=c["bg"], foreground=c["text"], font=("Segoe UI", 10))
+        if hasattr(self, "nb"):
+            self.restyle_widget_tree(self.root, "root")
+
+    def style_tk_widget(self, widget, kind="surface"):
+        c = self.colors
+        bg = c["surface"]
+        fg = c["text"]
+        if kind == "root":
+            bg = c["bg"]
+        elif kind == "alt":
+            bg = c["surface_alt"]
+        elif kind == "danger":
+            bg = c["danger_bg"]
+            fg = c["danger_text"]
+
+        config = {"bg": bg}
+        widget_class = widget.winfo_class()
+        if widget_class in {"Label", "Button", "Checkbutton", "Radiobutton", "LabelFrame"}:
+            config["fg"] = fg
+        if widget_class in {"Entry", "Text"}:
+            config.update({
+                "bg": c["surface"],
+                "fg": c["text"],
+                "insertbackground": c["text"],
+                "highlightbackground": c["border"],
+                "highlightcolor": c["accent"],
+            })
+        if widget_class == "LabelFrame":
+            config.update({"highlightthickness": 1, "highlightbackground": c["border"]})
+        widget.configure(**config)
+
+    def restyle_widget_tree(self, widget, kind="surface"):
+        try:
+            if widget == self.root:
+                self.style_tk_widget(widget, "root")
+            elif widget in {getattr(self, "alert_frame", None), getattr(self, "alert_label", None)}:
+                self.style_tk_widget(widget, "danger")
+            elif widget.winfo_class() in {"Frame", "LabelFrame", "Label", "Entry", "Text"}:
+                self.style_tk_widget(widget, kind)
+        except tk.TclError:
+            return
+
+        for child in widget.winfo_children():
+            child_kind = "danger" if child in {getattr(self, "alert_frame", None), getattr(self, "alert_label", None)} else kind
+            self.restyle_widget_tree(child, child_kind)
         
     def create_dashboard_tab(self):
         self.tab_dash = ttk.Frame(self.nb)
         self.nb.add(self.tab_dash, text="📊 Dashboard")
         
         # Budget alerts frame
-        self.alert_frame = tk.Frame(self.tab_dash, bg="#FFEBEE", relief='groove', bd=1)
+        self.alert_frame = tk.Frame(self.tab_dash, relief='groove', bd=1)
+        self.style_tk_widget(self.alert_frame, "danger")
         self.alert_frame.pack(fill="x", padx=12, pady=5)
-        self.alert_label = tk.Label(self.alert_frame, text="", bg="#FFEBEE", fg="#D32F2F", font=("Arial", 10))
+        self.alert_label = tk.Label(self.alert_frame, text="", font=("Segoe UI", 10))
+        self.style_tk_widget(self.alert_label, "danger")
         self.alert_label.pack(pady=5)
         
         # Main dashboard content
         dash_content = tk.Frame(self.tab_dash)
+        self.style_tk_widget(dash_content)
         dash_content.pack(fill="both", expand=True, padx=12, pady=8)
         
         # Left column - Stats
         left_frame = tk.Frame(dash_content)
+        self.style_tk_widget(left_frame)
         left_frame.pack(side="left", fill="both", expand=True)
         
         # Current month total
-        stat_frame1 = tk.LabelFrame(left_frame, text="Current Month", padx=10, pady=10)
+        stat_frame1 = tk.LabelFrame(left_frame, text="Current Month", padx=10, pady=10, font=("Segoe UI Semibold", 10))
+        self.style_tk_widget(stat_frame1)
         stat_frame1.pack(fill="x", pady=5)
-        self.label_total_val = tk.Label(stat_frame1, text="₹0.00", font=("Arial", 24, "bold"), fg="#2E7D32")
+        self.label_total_val = tk.Label(stat_frame1, text="₹0.00", font=("Segoe UI Semibold", 24), fg="#2E7D32")
+        self.style_tk_widget(self.label_total_val)
         self.label_total_val.pack()
         
         # Top categories
-        stat_frame2 = tk.LabelFrame(left_frame, text="Top Categories This Month", padx=10, pady=10)
+        stat_frame2 = tk.LabelFrame(left_frame, text="Top Categories This Month", padx=10, pady=10, font=("Segoe UI Semibold", 10))
+        self.style_tk_widget(stat_frame2)
         stat_frame2.pack(fill="x", pady=5)
-        self.label_topcats_val = tk.Label(stat_frame2, text="No data", justify="left", font=("Arial", 10))
+        self.label_topcats_val = tk.Label(stat_frame2, text="No data", justify="left", font=("Segoe UI", 10))
+        self.style_tk_widget(self.label_topcats_val)
         self.label_topcats_val.pack()
         
         # Top expenses
-        stat_frame3 = tk.LabelFrame(left_frame, text="Largest Expenses", padx=10, pady=10)
+        stat_frame3 = tk.LabelFrame(left_frame, text="Largest Expenses", padx=10, pady=10, font=("Segoe UI Semibold", 10))
+        self.style_tk_widget(stat_frame3)
         stat_frame3.pack(fill="x", pady=5)
-        self.label_topitems_val = tk.Label(stat_frame3, text="No data", justify="left", font=("Arial", 9))
+        self.label_topitems_val = tk.Label(stat_frame3, text="No data", justify="left", font=("Segoe UI", 9))
+        self.style_tk_widget(self.label_topitems_val)
         self.label_topitems_val.pack()
         
         # Right column - Charts preview
         right_frame = tk.Frame(dash_content)
+        self.style_tk_widget(right_frame)
         right_frame.pack(side="right", fill="both", expand=True, padx=10)
         
         # Quick charts frame
-        charts_frame = tk.LabelFrame(right_frame, text="Quick Charts", padx=10, pady=10)
+        charts_frame = tk.LabelFrame(right_frame, text="Quick Charts", padx=10, pady=10, font=("Segoe UI Semibold", 10))
+        self.style_tk_widget(charts_frame)
         charts_frame.pack(fill="both", expand=True, pady=5)
         
         # Create matplotlib figure for dashboard
-        self.dash_fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(10, 4))
-        self.dash_fig.patch.set_facecolor('#f0f0f0')
-        
-        self.canvas = FigureCanvasTkAgg(self.dash_fig, charts_frame)
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        self.canvas = None
+        self.dash_fig = None
+        self.ax1 = None
+        self.ax2 = None
+        if MATPLOTLIB_AVAILABLE:
+            self.dash_fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(10, 4))
+            self.dash_fig.patch.set_facecolor('#f0f0f0')
+            
+            self.canvas = FigureCanvasTkAgg(self.dash_fig, charts_frame)
+            self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        else:
+            unavailable_label = tk.Label(
+                charts_frame,
+                text="Charts are unavailable because matplotlib is not installed.",
+                justify="left",
+                wraplength=320,
+                font=("Segoe UI", 10)
+            )
+            self.style_tk_widget(unavailable_label)
+            unavailable_label.pack(fill="both", expand=True, pady=20)
         
         # Insight frame
-        insight_frame = tk.LabelFrame(left_frame, text="Spending Insight", padx=10, pady=10)
+        insight_frame = tk.LabelFrame(left_frame, text="Spending Insight", padx=10, pady=10, font=("Segoe UI Semibold", 10))
+        self.style_tk_widget(insight_frame)
         insight_frame.pack(fill="x", pady=5)
-        self.label_insight_val = tk.Label(insight_frame, text="No insight yet", wraplength=400, justify="left", font=("Arial", 9))
+        self.label_insight_val = tk.Label(insight_frame, text="No insight yet", wraplength=400, justify="left", font=("Segoe UI", 9))
+        self.style_tk_widget(self.label_insight_val)
         self.label_insight_val.pack()
         
     def create_expenses_tab(self):
@@ -315,7 +485,8 @@ class ExpenseTracker:
         self.nb.add(self.tab_exp, text="🧾 Expenses")
         
         # Entry frame
-        entry_frame = tk.LabelFrame(self.tab_exp, text="Add Expense", padx=8, pady=8)
+        entry_frame = tk.LabelFrame(self.tab_exp, text="Add Expense", padx=8, pady=8, font=("Segoe UI Semibold", 10))
+        self.style_tk_widget(entry_frame)
         entry_frame.pack(fill="x", padx=12, pady=8)
         
         # Date
@@ -355,7 +526,8 @@ class ExpenseTracker:
         self.create_table_frame()
         
     def create_search_frame(self):
-        filter_frame = tk.LabelFrame(self.tab_exp, text="Search & Filters", padx=8, pady=6)
+        filter_frame = tk.LabelFrame(self.tab_exp, text="Search & Filters", padx=8, pady=6, font=("Segoe UI Semibold", 10))
+        self.style_tk_widget(filter_frame)
         filter_frame.pack(fill="x", padx=12, pady=6)
         
         tk.Label(filter_frame, text="Keyword").grid(row=0, column=0, padx=4)
@@ -380,6 +552,7 @@ class ExpenseTracker:
         
     def create_table_frame(self):
         table_frame = tk.Frame(self.tab_exp)
+        self.style_tk_widget(table_frame)
         table_frame.pack(fill="both", expand=True, padx=12, pady=6)
         
         columns = ("Date", "Category", "Description", "Notes", "Amount")
@@ -397,6 +570,7 @@ class ExpenseTracker:
         
         # Action buttons
         btn_frame = tk.Frame(self.tab_exp)
+        self.style_tk_widget(btn_frame)
         btn_frame.pack(fill="x", padx=12, pady=6)
         
         ttk.Button(btn_frame, text="Update Selected", command=self.update_selected).pack(side="left", padx=6)
@@ -408,6 +582,7 @@ class ExpenseTracker:
         self.nb.add(self.tab_charts, text="📈 Charts")
         
         chart_btn_frame = tk.Frame(self.tab_charts)
+        self.style_tk_widget(chart_btn_frame)
         chart_btn_frame.pack(fill="x", padx=12, pady=8)
         
         ttk.Button(chart_btn_frame, text="Pie: Spending by Category", command=self.show_pie_chart).pack(side="left", padx=6)
@@ -418,9 +593,12 @@ class ExpenseTracker:
         self.tab_backup = ttk.Frame(self.nb)
         self.nb.add(self.tab_backup, text="💾 Backup & Export")
         
-        tk.Label(self.tab_backup, text="Data Management", font=("Arial", 12)).pack(pady=8)
+        backup_label = tk.Label(self.tab_backup, text="Data Management", font=("Segoe UI Semibold", 12))
+        self.style_tk_widget(backup_label, "root")
+        backup_label.pack(pady=8)
         
         btn_frame = tk.Frame(self.tab_backup)
+        self.style_tk_widget(btn_frame)
         btn_frame.pack(pady=10)
         
         ttk.Button(btn_frame, text="Export CSV", command=self.export_csv_ui).grid(row=0, column=0, padx=6, pady=6)
@@ -434,7 +612,8 @@ class ExpenseTracker:
         self.nb.add(self.tab_budget, text="💰 Budget")
         
         # Budget setup frame
-        setup_frame = tk.LabelFrame(self.tab_budget, text="Set Budgets", padx=10, pady=10)
+        setup_frame = tk.LabelFrame(self.tab_budget, text="Set Budgets", padx=10, pady=10, font=("Segoe UI Semibold", 10))
+        self.style_tk_widget(setup_frame)
         setup_frame.pack(fill="x", padx=12, pady=8)
         
         tk.Label(setup_frame, text="Overall Monthly Budget:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
@@ -452,10 +631,12 @@ class ExpenseTracker:
         ttk.Button(setup_frame, text="Set Budget", command=self.set_budget).grid(row=1, column=4, padx=10, pady=5)
         
         # Current budgets display
-        budget_display = tk.LabelFrame(self.tab_budget, text="Current Budgets", padx=10, pady=10)
+        budget_display = tk.LabelFrame(self.tab_budget, text="Current Budgets", padx=10, pady=10, font=("Segoe UI Semibold", 10))
+        self.style_tk_widget(budget_display)
         budget_display.pack(fill="both", expand=True, padx=12, pady=8)
         
-        self.budget_text = tk.Text(budget_display, height=10, width=60)
+        self.budget_text = tk.Text(budget_display, height=10, width=60, font=("Consolas", 10), relief="flat")
+        self.style_tk_widget(self.budget_text)
         self.budget_text.pack(fill="both", expand=True, padx=5, pady=5)
         
         ttk.Button(budget_display, text="Refresh Budgets", command=self.update_budget_display).pack(pady=5)
@@ -465,6 +646,7 @@ class ExpenseTracker:
         self.nb.add(self.tab_settings, text="⚙️ Settings")
         
         settings_frame = tk.Frame(self.tab_settings)
+        self.style_tk_widget(settings_frame)
         settings_frame.pack(fill="both", expand=True, padx=20, pady=20)
         
         # Theme selection
@@ -487,7 +669,8 @@ class ExpenseTracker:
         ttk.Button(settings_frame, text="Save Settings", command=self.save_settings).grid(row=3, column=0, columnspan=2, pady=15)
         
     def create_footer(self):
-        footer = tk.Frame(self.root, pady=6, bg="#f0f0f0")
+        footer = tk.Frame(self.root, pady=6)
+        self.style_tk_widget(footer, "alt")
         footer.pack(fill="x")
         
         ttk.Button(footer, text="Refresh All", command=self.refresh_data).pack(side="left", padx=8)
@@ -561,6 +744,7 @@ class ExpenseTracker:
         SETTINGS['default_currency'] = self.currency_var.get()
         SETTINGS['auto_backup'] = self.auto_backup_var.get()
         save_settings(SETTINGS)
+        self.apply_theme()
         messagebox.showinfo("Settings", "Settings saved successfully!")
         
     def safe_exit(self):
@@ -633,6 +817,9 @@ class ExpenseTracker:
             messagebox.showinfo("Duplicated", "Expense duplicated successfully!")
             
     def show_line_chart(self):
+        if not MATPLOTLIB_AVAILABLE:
+            show_chart_unavailable()
+            return
         rows = read_expenses()
         monthly_totals = totals_by_month(rows, months=12)
         
@@ -860,6 +1047,8 @@ class ExpenseTracker:
         self.update_mini_charts(rows)
         
     def update_mini_charts(self, rows):
+        if not MATPLOTLIB_AVAILABLE or not self.canvas:
+            return
         # Clear previous plots
         self.ax1.clear()
         self.ax2.clear()
@@ -882,6 +1071,9 @@ class ExpenseTracker:
         self.canvas.draw()
         
     def show_pie_chart(self):
+        if not MATPLOTLIB_AVAILABLE:
+            show_chart_unavailable()
+            return
         rows = read_expenses()
         t = totals_by_category(rows)
         if not t:
@@ -893,6 +1085,9 @@ class ExpenseTracker:
         plt.show()
         
     def show_month_bar_chart(self):
+        if not MATPLOTLIB_AVAILABLE:
+            show_chart_unavailable()
+            return
         rows = read_expenses()
         m = totals_by_month(rows, months=6)
         if not m:
